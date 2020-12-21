@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from typing import List, Optional, Tuple, Union
 
 
-CONTRACT_SEPARATOR_PATTERN = re.compile(r'^======= (?P<file_name>.+):(?P<contract_name>[^:]+) =======$', re.MULTILINE)
+CONTRACT_SEPARATOR_PATTERN = re.compile(r'^======= (?:(?P<file_name>.+):)?(?P<contract_name>[^:]+) =======$', re.MULTILINE)
 BYTECODE_REGEX = re.compile(r'^Binary:\n(?P<bytecode>.*)$', re.MULTILINE)
 METADATA_REGEX = re.compile(r'^Metadata:\n(?P<metadata>\{.*\})$', re.MULTILINE)
 
@@ -32,7 +32,7 @@ class SMTUse(Enum):
 @dataclass(frozen=True)
 class ContractReport:
     contract_name: str
-    file_name: Path
+    file_name: Optional[Path]
     bytecode: Optional[str]
     metadata: Optional[str]
 
@@ -166,7 +166,7 @@ def parse_cli_output(source_file_name: Path, cli_output: str) -> FileReport:
         assert file_report.contract_reports is not None
         file_report.contract_reports.append(ContractReport(
             contract_name=contract_name,
-            file_name=Path(file_name),
+            file_name=Path(file_name) if file_name is not None else None,
             bytecode=bytecode_match['bytecode'] if bytecode_match is not None else None,
             metadata=metadata_match['metadata'] if metadata_match is not None else None,
         ))

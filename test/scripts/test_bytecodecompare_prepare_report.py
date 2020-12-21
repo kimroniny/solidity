@@ -32,6 +32,9 @@ STACK_TOO_DEEP_CLI_OUTPUT = load_fixture('stack_too_deep_cli_output.txt')
 CODE_GENERATION_ERROR_JSON_OUTPUT = load_fixture('code_generation_error_json_output.json')
 CODE_GENERATION_ERROR_CLI_OUTPUT = load_fixture('code_generation_error_cli_output.txt')
 
+SOLC_0_4_0_CLI_OUTPUT = load_fixture('solc_0.4.0_cli_output.txt')
+SOLC_0_4_8_CLI_OUTPUT = load_fixture('solc_0.4.8_cli_output.txt')
+
 
 class TestPrepareReport_FileReport(unittest.TestCase):
     def test_format_report(self):
@@ -333,3 +336,33 @@ class TestPrepareReport(unittest.TestCase):
         expected_report = FileReport(file_name=Path('file.sol'), contract_reports=None)
 
         self.assertEqual(parse_cli_output(Path('file.sol'), CODE_GENERATION_ERROR_CLI_OUTPUT), expected_report)
+
+    def test_parse_cli_output_should_handle_output_from_solc_0_4_0(self):
+        expected_report = FileReport(
+            file_name=Path('contract.sol'),
+            contract_reports=[
+                ContractReport(
+                    contract_name='C',
+                    file_name=None,
+                    bytecode='6060604052600c8060106000396000f360606040526008565b600256',
+                    metadata=None,
+                )
+            ]
+        )
+
+        self.assertEqual(parse_cli_output(Path('contract.sol'), SOLC_0_4_0_CLI_OUTPUT), expected_report)
+
+    def test_parse_cli_output_should_handle_output_from_solc_0_4_8(self):
+        expected_report = FileReport(
+            file_name=Path('contract.sol'),
+            contract_reports=[
+                ContractReport(
+                    contract_name='C',
+                    file_name=None,
+                    bytecode='6060604052346000575b60358060166000396000f30060606040525b60005600a165627a7a72305820ccf9337430b4c4f7d6ad41efb10a94411a2af6a9f173ef52daeadd31f4bf11890029',
+                    metadata='{"compiler":{"version":"0.4.8+commit.60cc1668.mod.Darwin.appleclang"},"language":"Solidity","output":{"abi":[],"devdoc":{"methods":{}},"userdoc":{"methods":{}}},"settings":{"compilationTarget":{"contract.sol":"C"},"libraries":{},"optimizer":{"enabled":false,"runs":200},"remappings":[]},"sources":{"contract.sol":{"keccak256":"0xbe86d3681a198587296ad6d4a834606197e1a8f8944922c501631b04e21eeba2","urls":["bzzr://af16957d3d86013309d64d3cc572d007b1d8b08a821f2ff366840deb54a78524"]}},"version":1}',
+                )
+            ]
+        )
+
+        self.assertEqual(parse_cli_output(Path('contract.sol'), SOLC_0_4_8_CLI_OUTPUT), expected_report)
