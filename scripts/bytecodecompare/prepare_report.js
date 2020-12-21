@@ -22,7 +22,21 @@ for (const optimize of [false, true])
 
             const result = JSON.parse(compiler.compile(JSON.stringify(input)))
 
-            if (!('contracts' in result))
+            let internalCompilerError = false
+            if ('errors' in result)
+            {
+                for (const error of result['errors'])
+                    // JSON interface still returns contract metadata in case of an internal compiler error while
+                    // CLI interface does not. To make reports comparable we must force this case to be detected as
+                    // an error in both cases.
+                    if (['UnimplementedFeatureError', 'CompilerError', 'CodeGenerationError'].includes(error['type']))
+                    {
+                        internalCompilerError = true
+                        break
+                    }
+            }
+
+            if (!('contracts' in result) || internalCompilerError)
                 // NOTE: do not exit here because this may be run on source which cannot be compiled
                 console.log(filename + ': <ERROR>')
             else
