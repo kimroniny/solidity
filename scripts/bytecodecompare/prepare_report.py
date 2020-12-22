@@ -13,9 +13,9 @@ from tempfile import TemporaryDirectory
 from typing import List, Optional, Tuple, Union
 
 
-CONTRACT_SEPARATOR_PATTERN = re.compile(r'^======= (?:(?P<file_name>.+):)?(?P<contract_name>[^:]+) =======$', re.MULTILINE)
-BYTECODE_REGEX = re.compile(r'^Binary:\n(?P<bytecode>.*)$', re.MULTILINE)
-METADATA_REGEX = re.compile(r'^Metadata:\n(?P<metadata>\{.*\})$', re.MULTILINE)
+CONTRACT_SEPARATOR_PATTERN = re.compile(r'^=======\s+(?:(?P<file_name>.+):)?(?P<contract_name>[^:]+)\s+=======$', re.MULTILINE)
+BYTECODE_REGEX = re.compile(r'^Binary:\s*\n(?P<bytecode>.*)$', re.MULTILINE)
+METADATA_REGEX = re.compile(r'^Metadata:\s*\n(?P<metadata>\{.*\})$', re.MULTILINE)
 
 
 class CompilerInterface(Enum):
