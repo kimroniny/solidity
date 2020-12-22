@@ -33,7 +33,9 @@ for (const optimize of [false, true])
         {
             let input = {
                 language: 'Solidity',
-                sources: {content: loadSource(filename, stripSMTPragmas)},
+                sources: {
+                    [filename]: {content: loadSource(filename, stripSMTPragmas)}
+                },
                 settings: {
                     optimizer: {enabled: optimize},
                     outputSelection: {'*': {'*': ['evm.bytecode.object', 'metadata']}}
