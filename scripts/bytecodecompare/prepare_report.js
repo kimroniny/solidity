@@ -24,15 +24,15 @@ for (const optimize of [false, true])
 
             if (!('contracts' in result))
                 // NOTE: do not exit here because this may be run on source which cannot be compiled
-                console.log(filename + ': ERROR')
+                console.log(filename + ': <ERROR>')
             else
                 for (const contractFile in result['contracts'])
                     for (const contractName in result['contracts'][contractFile])
                     {
                         const contractResults = result['contracts'][contractFile][contractName]
 
-                        let bytecode = 'NO BYTECODE'
-                        let metadata = 'NO METADATA'
+                        let bytecode = '<NO BYTECODE>'
+                        let metadata = '<NO METADATA>'
 
                         if ('evm' in contractResults && 'bytecode' in contractResults['evm'] && 'object' in contractResults['evm']['bytecode'])
                             bytecode = contractResults.evm.bytecode.object
