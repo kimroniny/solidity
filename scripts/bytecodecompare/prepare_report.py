@@ -5,9 +5,16 @@ import subprocess
 import json
 from argparse import ArgumentParser
 from dataclasses import dataclass
+from enum import Enum
 from glob import glob
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
+
+
+class SMTUse(Enum):
+    PRESERVE = 'preserve'
+    DISABLE = 'disable'
+    STRIP_PRAGMAS = 'strip-pragmas'
 
 
 @dataclass(frozen=True)
@@ -41,9 +48,12 @@ class FileReport:
         return report
 
 
-def load_source(path: Union[Path, str]) -> str:
+def load_source(path: Union[Path, str], smt_use: SMTUse) -> str:
     with open(path, mode='r', encoding='utf8') as source_file:
         file_content = source_file.read()
+
+    if smt_use == SMTUse.STRIP_PRAGMAS:
+        return file_content.replace('pragma experimental SMTChecker;', '')
 
     return file_content
 
@@ -68,18 +78,20 @@ def parse_standard_json_output(source_file_name: Path, standard_json_output: str
     return file_report
 
 
-def prepare_compiler_input(compiler_path: Path, source_file_name: Path, optimize: bool) -> Tuple[List[str], str]:
+def prepare_compiler_input(compiler_path: Path, source_file_name: Path, optimize: bool, smt_use: SMTUse) -> Tuple[List[str], str]:
     json_input: dict = {
         'language': 'Solidity',
         'sources': {
-            str(source_file_name): {'content': load_source(source_file_name)}
+            str(source_file_name): {'content': load_source(source_file_name, smt_use)}
         },
         'settings': {
             'optimizer': {'enabled': optimize},
             'outputSelection': {'*': {'*': ['evm.bytecode.object', 'metadata']}},
-            'modelChecker': {'engine': 'none'},
         }
     }
+
+    if smt_use == SMTUse.DISABLE:
+        json_input['settings']['modelChecker'] = {'engine': 'none'}
 
     command_line = [str(compiler_path), '--standard-json']
     compiler_input = json.dumps(json_input)
@@ -87,8 +99,8 @@ def prepare_compiler_input(compiler_path: Path, source_file_name: Path, optimize
     return (command_line, compiler_input)
 
 
-def run_compiler(compiler_path: Path, source_file_name: Path, optimize: bool) -> FileReport:
-    (command_line, compiler_input) = prepare_compiler_input(compiler_path, Path(source_file_name).name, optimize)
+def run_compiler(compiler_path: Path, source_file_name: Path, optimize: bool, smt_use: SMTUse) -> FileReport:
+    (command_line, compiler_input) = prepare_compiler_input(compiler_path, Path(source_file_name).name, optimize, smt_use)
 
     process = subprocess.run(
         command_line,
@@ -100,12 +112,12 @@ def run_compiler(compiler_path: Path, source_file_name: Path, optimize: bool) ->
     return parse_standard_json_output(Path(source_file_name), process.stdout)
 
 
-def generate_report(source_file_names: List[str], compiler_path: Path):
+def generate_report(source_file_names: List[str], compiler_path: Path, smt_use: SMTUse):
     with open('report.txt', mode='w', encoding='utf8', newline='\n') as report_file:
         for optimize in [False, True]:
             for source_file_name in sorted(source_file_names):
                 try:
-                    report = run_compiler(Path(compiler_path), Path(source_file_name), optimize)
+                    report = run_compiler(Path(compiler_path), Path(source_file_name), optimize, smt_use)
                     report_file.write(report.format_report())
                 except subprocess.CalledProcessError as exception:
                     print(f"\n\nInterrupted by an exception while processing file '{source_file_name}' with optimize={optimize}\n", file=sys.stderr)
@@ -125,6 +137,7 @@ def commandline_parser() -> ArgumentParser:
 
     parser = ArgumentParser(description=script_description)
     parser.add_argument(dest='compiler_path', help="Solidity compiler executable")
+    parser.add_argument('--smt-use', dest='smt_use', default=SMTUse.DISABLE.value, choices=[s.value for s in SMTUse], help="What to do about contracts that use the experimental SMT checker.")
     return parser;
 
 
@@ -133,4 +146,5 @@ if __name__ == "__main__":
     generate_report(
         glob("*.sol"),
         Path(options.compiler_path),
+        SMTUse(options.smt_use),
     )
