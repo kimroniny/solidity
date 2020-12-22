@@ -3,12 +3,24 @@
 import sys
 import subprocess
 import json
+import re
 from argparse import ArgumentParser
 from dataclasses import dataclass
 from enum import Enum
 from glob import glob
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import List, Optional, Tuple, Union
+
+
+CONTRACT_SEPARATOR_PATTERN = re.compile(r'^======= (?P<file_name>.+):(?P<contract_name>[^:]+) =======$', re.MULTILINE)
+BYTECODE_REGEX = re.compile(r'^Binary:\n(?P<bytecode>.*)$', re.MULTILINE)
+METADATA_REGEX = re.compile(r'^Metadata:\n(?P<metadata>\{.*\})$', re.MULTILINE)
+
+
+class CompilerInterface(Enum):
+    CLI = 'cli'
+    STANDARD_JSON = 'standard-json'
 
 
 class SMTUse(Enum):
@@ -47,6 +59,53 @@ class FileReport:
 
         return report
 
+    def format_summary(self, verbose: bool) -> str:
+        error = (self.contract_reports is None)
+        contract_reports = self.contract_reports if self.contract_reports is not None else []
+        no_bytecode = any(bytecode is None for bytecode in contract_reports)
+        no_metadata = any(metadata is None for metadata in contract_reports)
+
+        if verbose:
+            flags = ('E' if error else ' ') + ('B' if no_bytecode else ' ') + ('M' if no_metadata else ' ')
+            contract_count = '?' if self.contract_reports is None else str(len(self.contract_reports))
+            return f"{contract_count} {flags} {self.file_name}"
+        else:
+            if error:
+                return 'E'
+            if no_bytecode:
+                return 'B'
+            if no_metadata:
+                return 'M'
+
+            return '.'
+
+
+@dataclass
+class Statistics:
+    file_count: int = 0
+    contract_count: int = 0
+    error_count: int = 0
+    missing_bytecode_count: int = 0
+    missing_metadata_count: int = 0
+
+    def aggregate(self, report: FileReport):
+        contract_reports = report.contract_reports if report.contract_reports is not None else []
+
+        self.file_count += 1
+        self.contract_count += len(contract_reports)
+        self.error_count += (1 if report.contract_reports is None else 0)
+        self.missing_bytecode_count += sum(1 for c in contract_reports if c.bytecode is None)
+        self.missing_metadata_count += sum(1 for c in contract_reports if c.metadata is None)
+
+    def __str__(self) -> str:
+        return "test cases: {}, contracts: {}, errors: {}, missing bytecode: {}, missing metadata: {}".format(
+            self.file_count,
+            str(self.contract_count) + ('+' if self.error_count > 0 else ''),
+            self.error_count,
+            self.missing_bytecode_count,
+            self.missing_metadata_count,
+        )
+
 
 def load_source(path: Union[Path, str], smt_use: SMTUse) -> str:
     with open(path, mode='r', encoding='utf8') as source_file:
@@ -59,7 +118,10 @@ def load_source(path: Union[Path, str], smt_use: SMTUse) -> str:
 
 
 def parse_standard_json_output(source_file_name: Path, standard_json_output: str) -> FileReport:
-    decoded_json_output = json.loads(standard_json_output.strip())
+    try:
+        decoded_json_output = json.loads(standard_json_output.strip())
+    except json.decoder.JSONDecodeError:
+        return FileReport(file_name=source_file_name, contract_reports=None)
 
     if 'contracts' not in decoded_json_output:
         return FileReport(file_name=source_file_name, contract_reports=None)
@@ -78,55 +140,125 @@ def parse_standard_json_output(source_file_name: Path, standard_json_output: str
     return file_report
 
 
-def prepare_compiler_input(compiler_path: Path, source_file_name: Path, optimize: bool, smt_use: SMTUse) -> Tuple[List[str], str]:
-    json_input: dict = {
-        'language': 'Solidity',
-        'sources': {
-            str(source_file_name): {'content': load_source(source_file_name, smt_use)}
-        },
-        'settings': {
-            'optimizer': {'enabled': optimize},
-            'outputSelection': {'*': {'*': ['evm.bytecode.object', 'metadata']}},
+def parse_cli_output(source_file_name: Path, cli_output: str) -> FileReport:
+    # re.split() returns a list containing the text beween pattern occurrences but also inserts the
+    # content of matched groups in between. It also never omits the empty elements so the number of
+    # list items is predictable (3 per match + the text before the first match)
+    output_segments = re.split(CONTRACT_SEPARATOR_PATTERN, cli_output)
+    assert len(output_segments) % 3 == 1
+
+    if len(output_segments) == 1:
+        return FileReport(file_name=source_file_name, contract_reports=None)
+
+    file_report = FileReport(file_name=source_file_name, contract_reports=[])
+    for file_name, contract_name, contract_output in zip(output_segments[1::3], output_segments[2::3], output_segments[3::3]):
+        bytecode_match = re.search(BYTECODE_REGEX, contract_output)
+        metadata_match = re.search(METADATA_REGEX, contract_output)
+
+        assert file_report.contract_reports is not None
+        file_report.contract_reports.append(ContractReport(
+            contract_name=contract_name,
+            file_name=Path(file_name),
+            bytecode=bytecode_match['bytecode'] if bytecode_match is not None else None,
+            metadata=metadata_match['metadata'] if metadata_match is not None else None,
+        ))
+
+    return file_report
+
+
+def prepare_compiler_input(compiler_path: Path, source_file_name: Path, optimize: bool, interface: CompilerInterface, smt_use: SMTUse) -> Tuple[List[str], str]:
+    if interface == CompilerInterface.STANDARD_JSON:
+        json_input: dict = {
+            'language': 'Solidity',
+            'sources': {
+                str(source_file_name): {'content': load_source(source_file_name, smt_use)}
+            },
+            'settings': {
+                'optimizer': {'enabled': optimize},
+                'outputSelection': {'*': {'*': ['evm.bytecode.object', 'metadata']}},
+            }
         }
-    }
 
-    if smt_use == SMTUse.DISABLE:
-        json_input['settings']['modelChecker'] = {'engine': 'none'}
+        if smt_use == SMTUse.DISABLE:
+            json_input['settings']['modelChecker'] = {'engine': 'none'}
 
-    command_line = [str(compiler_path), '--standard-json']
-    compiler_input = json.dumps(json_input)
+        command_line = [str(compiler_path), '--standard-json']
+        compiler_input = json.dumps(json_input)
+    else:
+        assert interface == CompilerInterface.CLI
+
+        compiler_options = [str(source_file_name), '--bin', '--metadata']
+        if optimize:
+            compiler_options.append('--optimize')
+        if smt_use == SMTUse.DISABLE:
+            compiler_options += ['--model-checker-engine', 'none']
+
+        command_line = [str(compiler_path)] + compiler_options
+        compiler_input = load_source(source_file_name, smt_use)
 
     return (command_line, compiler_input)
 
 
-def run_compiler(compiler_path: Path, source_file_name: Path, optimize: bool, smt_use: SMTUse) -> FileReport:
-    (command_line, compiler_input) = prepare_compiler_input(compiler_path, Path(source_file_name).name, optimize, smt_use)
+def run_compiler(compiler_path: Path, source_file_name: Path, optimize: bool, interface: CompilerInterface, smt_use: SMTUse, tmp_dir: Path, exit_on_error: bool) -> FileReport:
+    if interface == CompilerInterface.STANDARD_JSON:
+        (command_line, compiler_input) = prepare_compiler_input(compiler_path, Path(source_file_name).name, optimize, interface, smt_use)
 
-    process = subprocess.run(
-        command_line,
-        input=compiler_input,
-        encoding='utf8',
-        capture_output=True,
-    )
+        process = subprocess.run(
+            command_line,
+            input=compiler_input,
+            encoding='utf8',
+            capture_output=True,
+            check=exit_on_error,
+        )
 
-    return parse_standard_json_output(Path(source_file_name), process.stdout)
+        return parse_standard_json_output(Path(source_file_name), process.stdout)
+    else:
+        assert interface == CompilerInterface.CLI
+        assert tmp_dir is not None
+
+        (command_line, compiler_input) = prepare_compiler_input(compiler_path.absolute(), source_file_name.name, optimize, interface, smt_use)
+
+        # Create a copy that we can use directly with the CLI interface
+        modified_source_path = tmp_dir / source_file_name.name
+        with open(modified_source_path, 'w') as modified_source_file:
+            modified_source_file.write(compiler_input)
+
+        process = subprocess.run(
+            command_line,
+            cwd=tmp_dir,
+            encoding='utf8',
+            capture_output=True,
+            check=exit_on_error,
+        )
+
+        return parse_cli_output(Path(source_file_name), process.stdout)
 
 
-def generate_report(source_file_names: List[str], compiler_path: Path, smt_use: SMTUse):
-    with open('report.txt', mode='w', encoding='utf8', newline='\n') as report_file:
-        for optimize in [False, True]:
-            for source_file_name in sorted(source_file_names):
-                try:
-                    report = run_compiler(Path(compiler_path), Path(source_file_name), optimize, smt_use)
-                    report_file.write(report.format_report())
-                except subprocess.CalledProcessError as exception:
-                    print(f"\n\nInterrupted by an exception while processing file '{source_file_name}' with optimize={optimize}\n", file=sys.stderr)
-                    print(f"COMPILER STDOUT:\n{exception.stdout}", file=sys.stderr)
-                    print(f"COMPILER STDERR:\n{exception.stderr}", file=sys.stderr)
-                    raise
-                except:
-                    print(f"\n\nInterrupted by an exception while processing file '{source_file_name}' with optimize={optimize}\n", file=sys.stderr)
-                    raise
+def generate_report(source_file_names: List[str], compiler_path: Path, interface: CompilerInterface, smt_use: SMTUse, report_file_path: Path, verbose: bool, exit_on_error: bool):
+    statistics = Statistics()
+
+    try:
+        with open(report_file_path, mode='w', encoding='utf8', newline='\n') as report_file:
+            for optimize in [False, True]:
+                with TemporaryDirectory(prefix='prepare_report-') as tmp_dir:
+                    for source_file_name in sorted(source_file_names):
+                        try:
+                            report = run_compiler(Path(compiler_path), Path(source_file_name), optimize, interface, smt_use, Path(tmp_dir), exit_on_error)
+
+                            statistics.aggregate(report)
+                            print(report.format_summary(verbose), end=('\n' if verbose else ''), flush=True)
+
+                            report_file.write(report.format_report())
+                        except subprocess.CalledProcessError as exception:
+                            print(f"\n\nInterrupted by an exception while processing file '{source_file_name}' with optimize={optimize}\n", file=sys.stderr)
+                            print(f"COMPILER STDOUT:\n{exception.stdout}", file=sys.stderr)
+                            print(f"COMPILER STDERR:\n{exception.stderr}", file=sys.stderr)
+                            raise
+                        except:
+                            print(f"\n\nInterrupted by an exception while processing file '{source_file_name}' with optimize={optimize}\n", file=sys.stderr)
+                            raise
+    finally:
+        print('\n', statistics, '\n', sep='')
 
 
 def commandline_parser() -> ArgumentParser:
@@ -137,7 +269,11 @@ def commandline_parser() -> ArgumentParser:
 
     parser = ArgumentParser(description=script_description)
     parser.add_argument(dest='compiler_path', help="Solidity compiler executable")
+    parser.add_argument('--interface', dest='interface', default=CompilerInterface.STANDARD_JSON.value, choices=[c.value for c in CompilerInterface], help="Compiler interface to use.")
     parser.add_argument('--smt-use', dest='smt_use', default=SMTUse.DISABLE.value, choices=[s.value for s in SMTUse], help="What to do about contracts that use the experimental SMT checker.")
+    parser.add_argument('--report-file', dest='report_file', default='report.txt', help="The file to write the report to.")
+    parser.add_argument('--verbose', dest='verbose', default=False, action='store_true', help="More verbose ouptut.")
+    parser.add_argument('--exit-on-error', dest='exit_on_error', default=False, action='store_true', help="Immediately exit and print compiler output if the compiler exits with an error.")
     return parser;
 
 
@@ -146,5 +282,9 @@ if __name__ == "__main__":
     generate_report(
         glob("*.sol"),
         Path(options.compiler_path),
+        CompilerInterface(options.interface),
         SMTUse(options.smt_use),
+        Path(options.report_file),
+        options.verbose,
+        options.exit_on_error,
     )
